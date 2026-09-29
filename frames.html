@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>分帧排查</title>
+<style>
+  body { font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         margin: 16px; color: #1c1f26; background: #fff; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  #meta { margin-bottom: 8px; white-space: pre-wrap; }
+  #meta b { display: inline-block; min-width: 7em; color: #555; font-weight: 600; }
+  #legend span { display: inline-block; margin-right: 14px; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 2px;
+        vertical-align: -2px; margin-right: 4px; }
+  #wrap { overflow-x: auto; border: 1px solid #d8dbe0; border-radius: 4px; }
+  canvas { display: block; }
+  #tip { position: fixed; pointer-events: none; background: #1c1f26; color: #fff;
+         padding: 4px 8px; border-radius: 4px; font: 12px/1.4 monospace;
+         white-space: pre; z-index: 9; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>字节流分帧排查</h1>
+<div id="meta"></div>
+<div id="legend">
+  <span><span class="sw" style="background:#4c9be8"></span>帧（深色小段为 4 字节前缀）</span>
+  <span><span class="sw" style="background:#e02424"></span>未归入任何帧的尾部区间</span>
+  <span><span class="sw" style="background:#fff;border:1px solid #8a8f98"></span>块边界（每行一个块）</span>
+</div>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="tip" hidden></div>
+<script>
+const DATA = {"case":"05-oversize","chunks":[{"name":"chunk-000.bin","start":0,"size":14},{"name":"chunk-001.bin","start":14,"size":4},{"name":"chunk-002.bin","start":18,"size":10},{"name":"chunk-003.bin","start":28,"size":9}],"frames":[[0,10,6],[10,24,10]],"tail":[24,37],"report":{"status":"oversize","frames":2,"stream-bytes":37,"tail-start":24,"tail-bytes":13,"declared-length":65537}};
+const meta = document.getElementById("meta");
+const rep = DATA.report;
+const dash = v => v === null ? "-" : v;
+meta.innerHTML =
+  `<b>用例</b>${DATA.case}\n` +
+  `<b>status</b>${rep["status"]}\n` +
+  `<b>frames</b>${rep["frames"]}\n` +
+  `<b>stream-bytes</b>${rep["stream-bytes"]}\n` +
+  `<b>tail</b>${dash(rep["tail-start"])} .. ${rep["stream-bytes"]} (${rep["tail-bytes"]} 字节)\n` +
+  `<b>declared-length</b>${dash(rep["declared-length"])}`;
+
+const cv = document.getElementById("cv");
+const tip = document.getElementById("tip");
+const LABEL_W = 250, PAD_R = 24, TOP = 10, ROW_H = 22, GAP = 10;
+const maxChunk = Math.max(1, ...DATA.chunks.map(c => c.size));
+const W = 1280, BAR_MAX = W - LABEL_W - PAD_R;
+const H = TOP * 2 + DATA.chunks.length * (ROW_H + GAP);
+const dpr = window.devicePixelRatio || 1;
+cv.width = W * dpr; cv.height = H * dpr;
+cv.style.width = W + "px"; cv.style.height = H + "px";
+const ctx = cv.getContext("2d");
+ctx.scale(dpr, dpr);
+
+const rowY = j => TOP + j * (ROW_H + GAP);
+const barW = c => Math.max(2, BAR_MAX * c.size / maxChunk);
+const frameColor = i => `hsl(${(i * 47) % 360}, 62%, 55%)`;
+
+ctx.font = "11px monospace";
+DATA.chunks.forEach((c, j) => {
+  const y = rowY(j), w = barW(c);
+  ctx.fillStyle = "#f2f4f8";
+  ctx.fillRect(LABEL_W, y, w, ROW_H);
+  ctx.strokeStyle = "#8a8f98";
+  ctx.strokeRect(LABEL_W + 0.5, y + 0.5, w - 1, ROW_H - 1);
+  ctx.fillStyle = "#444";
+  ctx.textAlign = "right";
+  ctx.fillText(`${c.name} [${c.start}, ${c.start + c.size})`, LABEL_W - 8, y + ROW_H / 2 + 4);
+});
+
+function paintInterval(s, e, color, darkenPrefixFrom) {
+  let j = 0;
+  while (j < DATA.chunks.length && DATA.chunks[j].start + DATA.chunks[j].size <= s) j++;
+  for (; j < DATA.chunks.length && DATA.chunks[j].start < e; j++) {
+    const c = DATA.chunks[j];
+    if (c.size === 0) continue;
+    const cs = Math.max(s, c.start), ce = Math.min(e, c.start + c.size);
+    const w = barW(c);
+    const x0 = LABEL_W + w * (cs - c.start) / c.size;
+    const x1 = LABEL_W + w * (ce - c.start) / c.size;
+    ctx.fillStyle = color;
+    ctx.fillRect(x0, rowY(j), Math.max(1, x1 - x0), ROW_H);
+    if (darkenPrefixFrom !== null) {
+      const ps = Math.max(darkenPrefixFrom, cs), pe = Math.min(darkenPrefixFrom + 4, ce);
+      if (pe > ps) {
+        ctx.fillStyle = "rgba(0,0,0,0.45)";
+        ctx.fillRect(LABEL_W + w * (ps - c.start) / c.size, rowY(j),
+                     Math.max(1, w * (pe - ps) / c.size), ROW_H);
+      }
+    }
+  }
+}
+
+DATA.frames.forEach((f, i) => paintInterval(f[0], f[1], frameColor(i), f[0]));
+if (DATA.tail) paintInterval(DATA.tail[0], DATA.tail[1], "#e02424", null);
+
+function frameAt(off) {
+  let lo = 0, hi = DATA.frames.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1, f = DATA.frames[mid];
+    if (off < f[0]) hi = mid - 1;
+    else if (off >= f[1]) lo = mid + 1;
+    else { ans = mid; break; }
+  }
+  return ans;
+}
+
+cv.addEventListener("mousemove", ev => {
+  const rect = cv.getBoundingClientRect();
+  const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  const j = Math.floor((my - TOP) / (ROW_H + GAP));
+  let text = null;
+  if (j >= 0 && j < DATA.chunks.length && my - rowY(j) <= ROW_H) {
+    const c = DATA.chunks[j], w = barW(c);
+    if (c.size > 0 && mx >= LABEL_W && mx <= LABEL_W + w) {
+      const off = Math.min(c.start + c.size - 1,
+                           c.start + Math.floor((mx - LABEL_W) / w * c.size));
+      const k = frameAt(off);
+      if (k >= 0) {
+        const f = DATA.frames[k];
+        text = `帧 #${k + 1}  [${f[0]}, ${f[1]})  内容长度 ${f[2]}` +
+               (off < f[0] + 4 ? "\n（前缀区）" : "");
+      } else if (DATA.tail && off >= DATA.tail[0] && off < DATA.tail[1]) {
+        text = `未归入任何帧的尾部区间\n[${DATA.tail[0]}, ${DATA.tail[1]})`;
+      } else {
+        text = `偏移 ${off}`;
+      }
+    }
+  }
+  if (text) {
+    tip.textContent = text;
+    tip.hidden = false;
+    tip.style.left = (ev.clientX + 12) + "px";
+    tip.style.top = (ev.clientY + 12) + "px";
+  } else {
+    tip.hidden = true;
+  }
+});
+cv.addEventListener("mouseleave", () => { tip.hidden = true; });
+</script>
+</body>
+</html>
