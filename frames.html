@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>帧流视图 - 05-oversize</title>
+<style>
+  body { font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 16px 24px 32px; color: #222; background: #fafafa; }
+  h1 { font-size: 18px; margin: 8px 0 4px; }
+  #summary { color: #555; margin-bottom: 12px; }
+  #summary b { color: #111; }
+  .legend { margin: 8px 0 12px; font-size: 13px; color: #444; }
+  .legend span { display: inline-block; margin-right: 16px; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 2px;
+        vertical-align: -1px; margin-right: 4px; }
+  #wrap { position: relative; border: 1px solid #ccc; background: #fff; }
+  canvas { display: block; }
+  #tip { position: absolute; display: none; pointer-events: none; background: #111;
+         color: #fff; font-size: 12px; padding: 4px 8px; border-radius: 4px;
+         white-space: nowrap; z-index: 2; }
+  #scale { display: flex; justify-content: space-between; font-size: 12px;
+           color: #777; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>帧流视图：<span id="case"></span></h1>
+<div id="summary"></div>
+<div class="legend">
+  <span><span class="sw" style="background:#4c9aff"></span>帧（色块，相邻帧交替深浅）</span>
+  <span><span class="sw" style="background:#e5484d"></span>未归入任何帧的区间（tail）</span>
+  <span><span class="sw" style="background:#333"></span>块边界（竖线）</span>
+</div>
+<div id="wrap"><canvas id="bar"></canvas><div id="tip"></div></div>
+<div id="scale"><span id="lo"></span><span id="hi"></span></div>
+<script>
+"use strict";
+const DATA = {"caseName":"05-oversize","chunks":[14,18,28,37],"frames":[[0,10,6],[10,24,10]],"report":{"status":"oversize","frames":2,"stream_bytes":37,"tail_start":24,"tail_bytes":13,"declared_length":65537}};
+document.getElementById("case").textContent = DATA.caseName;
+const r = DATA.report;
+const tailDesc = r.tail_start === null ? "无" :
+  "[" + r.tail_start + ", " + r.stream_bytes + ") 共 " + r.tail_bytes + " 字节";
+document.getElementById("summary").innerHTML =
+  "状态 <b>" + r.status + "</b> ｜ 帧数 <b>" + r.frames + "</b> ｜ 流长 <b>" +
+  r.stream_bytes + "</b> 字节 ｜ 块数 <b>" + DATA.chunks.length + "</b> ｜ 尾部区间 <b>" +
+  tailDesc + "</b>" +
+  (r.declared_length === null ? "" : " ｜ 声明长度 <b>" + r.declared_length + "</b>");
+document.getElementById("lo").textContent = "偏移 0";
+document.getElementById("hi").textContent = "偏移 " + r.stream_bytes;
+
+const wrap = document.getElementById("wrap");
+const canvas = document.getElementById("bar");
+const tip = document.getElementById("tip");
+const W = Math.max(640, Math.min(1600, window.innerWidth - 48));
+const ROW_H = 26, ROW_GAP = 6, PAD = 4;
+const total = Math.max(1, r.stream_bytes);
+const rows = Math.max(1, Math.min(64, Math.ceil(total / 65536)));
+const rowBytes = total / rows;
+const H = PAD * 2 + rows * ROW_H + (rows - 1) * ROW_GAP;
+const dpr = window.devicePixelRatio || 1;
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + "px"; canvas.style.height = H + "px";
+const ctx = canvas.getContext("2d");
+ctx.scale(dpr, dpr);
+
+function xOf(off, row) { return (off - row * rowBytes) / rowBytes * W; }
+
+// 背景行
+for (let i = 0; i < rows; i++) {
+  ctx.fillStyle = i % 2 ? "#f3f4f6" : "#eceef1";
+  ctx.fillRect(0, PAD + i * (ROW_H + ROW_GAP), W, ROW_H);
+}
+// 帧色块
+const COLORS = ["#4c9aff", "#2f7de1"];
+DATA.frames.forEach((f, idx) => {
+  ctx.fillStyle = COLORS[idx % 2];
+  const first = Math.floor(f[0] / rowBytes), last = Math.floor((f[1] - 1) / rowBytes);
+  for (let row = first; row <= last && row < rows; row++) {
+    const x0 = Math.max(0, xOf(f[0], row));
+    const x1 = Math.min(W, xOf(f[1], row));
+    ctx.fillRect(x0, PAD + row * (ROW_H + ROW_GAP), Math.max(x1 - x0, 0.5), ROW_H);
+  }
+});
+// 尾部标红：恰好是 tail-* 描述的那段
+if (r.tail_start !== null && r.tail_bytes > 0) {
+  ctx.fillStyle = "#e5484d";
+  const end = r.tail_start + r.tail_bytes;
+  const first = Math.floor(r.tail_start / rowBytes), last = Math.floor((end - 1) / rowBytes);
+  for (let row = first; row <= last && row < rows; row++) {
+    const x0 = Math.max(0, xOf(r.tail_start, row));
+    const x1 = Math.min(W, xOf(end, row));
+    ctx.fillRect(x0, PAD + row * (ROW_H + ROW_GAP), Math.max(x1 - x0, 0.5), ROW_H);
+  }
+}
+// 块边界竖线
+ctx.strokeStyle = "rgba(20,20,20,0.55)";
+ctx.lineWidth = 1;
+DATA.chunks.forEach(c => {
+  const row = Math.min(rows - 1, Math.floor(c / rowBytes));
+  const x = xOf(c, row);
+  ctx.beginPath();
+  ctx.moveTo(x, PAD + row * (ROW_H + ROW_GAP) - 2);
+  ctx.lineTo(x, PAD + row * (ROW_H + ROW_GAP) + ROW_H + 2);
+  ctx.stroke();
+});
+
+// 悬停提示：按偏移二分查帧
+const starts = DATA.frames.map(f => f[0]);
+function frameAt(off) {
+  let lo = 0, hi = starts.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid] <= off) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (ans >= 0 && off < DATA.frames[ans][1]) return ans;
+  return -1;
+}
+canvas.addEventListener("mousemove", ev => {
+  const rect = canvas.getBoundingClientRect();
+  const x = ev.clientX - rect.left, y = ev.clientY - rect.top - PAD;
+  const row = Math.floor(y / (ROW_H + ROW_GAP));
+  if (row < 0 || row >= rows || y % (ROW_H + ROW_GAP) > ROW_H) { tip.style.display = "none"; return; }
+  const off = Math.floor(row * rowBytes + x / W * rowBytes);
+  let text;
+  const idx = frameAt(off);
+  if (idx >= 0) {
+    const f = DATA.frames[idx];
+    text = "帧 #" + (idx + 1) + "  [" + f[0] + ", " + f[1] + ")  长度 " + f[2];
+  } else if (r.tail_start !== null && off >= r.tail_start && off < r.tail_start + r.tail_bytes) {
+    text = "未归入帧的区间  偏移 " + off;
+  } else {
+    text = "偏移 " + off;
+  }
+  tip.textContent = text;
+  tip.style.display = "block";
+  tip.style.left = Math.min(x + 12, W - 160) + "px";
+  tip.style.top = (ev.clientY - rect.top + 14) + "px";
+});
+canvas.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+</script>
+</body>
+</html>
